@@ -24,8 +24,9 @@ dataset = datasets.MNIST(root='./data', train=True,
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 batch_size = 512
-epochs = 100
+epochs = 1000
 n_workers = 4
+load_prev = True
 
 
 # --- Cell 2 ---
@@ -340,6 +341,10 @@ model = BlenderV2(dim=128, num_layers=16)
 
 
 # --- Cell 7 ---
+if load_prev:
+    print(f"loading prev")
+    model.load_state_dict(torch.load(
+        "checkpoints/rf-v1.pth", map_location=device))
 model = model.to(device)
 torch.set_float32_matmul_precision("high")
 compiled_model = torch.compile(model)

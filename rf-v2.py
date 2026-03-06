@@ -23,9 +23,9 @@ dataset = datasets.MNIST(root='./data', train=True,
                          download=True, transform=transform)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-batch_size = 512
+batch_size = 1024
 epochs = 4000
-autoencoder_epochs = 2
+autoencoder_epochs = 4
 n_workers = 4
 
 
@@ -364,12 +364,13 @@ for epoch in range(autoencoder_epochs):
         pbar_ae.set_postfix({"loss": f"{loss.item():.4f}", "epoch": epoch})
 pbar_ae.close()
 
-print("freezing ae weights")
-for param in model.encoder.parameters():
-    param.requires_grad = False
-
-for param in model.decoder.parameters():
-    param.requires_grad = False
+print("not freezing weight.. what u gonna do about it")
+# print("freezing ae weights")
+# for param in model.encoder.parameters():
+#     param.requires_grad = False
+#
+# for param in model.decoder.parameters():
+#     param.requires_grad = False
 
 print("training rf")
 pbar = tqdm(total=len(dataloader) * epochs, ncols=100)

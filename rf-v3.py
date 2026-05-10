@@ -22,13 +22,14 @@ MODEL_DIM = 512
 MODEL_LAYERS = 8
 LEARNING_RATE = 1e-4
 CLASSIFIER_FREE_DROP_PROB = 0.5
-LOAD_MODEL = False
+LOAD_MODEL = True
 TRAIN_MODEL = True
 CHECKPOINT_PATH = "checkpoints/rf-v3.pth"
 AUTOMIXED_DTYPE = torch.bfloat16
 MATMUL_PRECISION = "high"
 PIN_MEMORY = torch.cuda.is_available()
 PERSISTENT_WORKERS = N_WORKERS > 0
+SAVE_EVERY_EPOCHS = 5
 
 transform = transforms.Compose(
     [
@@ -189,6 +190,10 @@ class Decoder(nn.Module):
         x = self.decoder(x)
         return x
 
+def save_checkpoint(model, path):
+    os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
+    torch.save(model.state_dict(), CHECKPOINT_PATH)
+    print(f"saved model weights to {CHECKPOINT_PATH}")
 
 class BlenderV2(nn.Module):
     def __init__(self, dim, num_layers):
@@ -274,6 +279,9 @@ if TRAIN_MODEL:
             pbar_ae.update(1)
             pbar_ae.set_postfix({"loss": f"{loss.item():.4f}", "epoch": epoch})
 
+        if (epoch + 1) % SAVE_EVERY_EPOCHS == 0:
+            save_checkpoint(model, CHECKPOINT_PATH)
+            print(f"checkpoint saved (ae epoch {epoch + 1}) to {CHECKPOINT_PATH}")
     pbar_ae.close()
     pbar = tqdm(total=len(dataloader) * EPOCHS, ncols=100)
 
@@ -312,6 +320,10 @@ if TRAIN_MODEL:
 
             pbar.update(1)
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "epoch": epoch})
+
+        if (epoch + 1) % SAVE_EVERY_EPOCHS == 0:
+            save_checkpoint(model, CHECKPOINT_PATH)
+            print(f"checkpoint saved (rf epoch {epoch + 1}) to {CHECKPOINT_PATH}")
 
     pbar.close()
 

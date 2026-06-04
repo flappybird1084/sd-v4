@@ -21,8 +21,8 @@ N_WORKERS = 4
 MODEL_DIM = 512
 MODEL_LAYERS = 8
 LEARNING_RATE = 1e-4
-CLASSIFIER_FREE_DROP_PROB = 0.5
-LOAD_MODEL = True
+CLASSIFIER_FREE_DROP_PROB = 0.1
+LOAD_MODEL = False
 TRAIN_MODEL = True
 CHECKPOINT_PATH = "checkpoints/rf-v3.pth"
 AUTOMIXED_DTYPE = torch.bfloat16
@@ -66,17 +66,19 @@ class Encoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.MaxPool2d(2, 2),
-            nn.ReLU(),
+            # nn.ReLU(),
             nn.Conv2d(64, dim, kernel_size=3, stride=1, padding=1),
             nn.MaxPool2d(2, 2),
-            nn.ReLU(),
+            # nn.ReLU(),
         )
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
         x = self.conv(x)
         x_shape = x.size()
         x = x.view(x_shape[0], x_shape[1], -1)
         x = x.permute(0, 2, 1)
+        x = self.norm(x)
         return x
 
 
@@ -87,6 +89,8 @@ class BlenderInternals(nn.Module):
         self.prompt_embed = nn.Embedding(11, dim)
         self.prompt_unembed = nn.Linear(dim, 1)
         self.timestep_fc = nn.Linear(dim, dim)
+        self.image_embed = nn.Embedding(16, dim)
+        self.register_buffer("pos_ids", torch.arange(16))
 
         self.image_q = nn.Linear(dim, dim)
         self.image_v = nn.Linear(dim, dim)
@@ -113,7 +117,7 @@ class BlenderInternals(nn.Module):
             t = t.squeeze(-1)
 
         freqs = self.timestep_freq.unsqueeze(0)
-        emb = t.unsqueeze(1) * freqs
+        emb = t.unsqueeze(1) * freqs * 1000
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
         return self.timestep_fc(emb)
@@ -128,25 +132,17 @@ class BlenderInternals(nn.Module):
         timestep = timestep.unsqueeze(1)
 
         image = image + timestep
+        image = torch.add(image, self.image_embed(self.pos_ids))
         prompt = prompt + timestep
 
-        image, prompt = self.ln1(image), self.ln1(prompt)
-        image_q = self.image_q(image)
-        image_k = self.image_k(image)
-        image_v = self.image_v(image)
+        image_norm, prompt_norm = self.ln1(image), self.ln1(prompt)
+        image_q = self.image_q(image_norm)
+        image_k = self.image_k(image_norm)
+        image_v = self.image_v(image_norm)
 
-        prompt_q = self.prompt_q(prompt)
-        prompt_k = self.prompt_k(prompt)
-        prompt_v = self.prompt_v(prompt)
-
-        image_q, image_k, image_v, prompt_q, prompt_k, prompt_v = (
-            self.ln1(image_q),
-            self.ln1(image_k),
-            self.ln1(image_v),
-            self.ln1(prompt_q),
-            self.ln1(prompt_k),
-            self.ln1(prompt_v),
-        )
+        prompt_q = self.prompt_q(prompt_norm)
+        prompt_k = self.prompt_k(prompt_norm)
+        prompt_v = self.prompt_v(prompt_norm)
 
         q = torch.cat([image_q, prompt_q], dim=1)
         k = torch.cat([image_k, prompt_k], dim=1)
@@ -167,14 +163,11 @@ class Decoder(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(dim, dim // 2, kernel_size=4,
-                               stride=2, padding=1),
+            nn.ConvTranspose2d(dim, dim // 2, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(dim // 2, dim // 4,
-                               kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(dim // 2, dim // 4, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(dim // 4, dim // 8,
-                               kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(dim // 4, dim // 8, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim // 8, 1, kernel_size=3, padding=1),
         )
@@ -190,10 +183,12 @@ class Decoder(nn.Module):
         x = self.decoder(x)
         return x
 
+
 def save_checkpoint(model, path):
     os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
     torch.save(model.state_dict(), CHECKPOINT_PATH)
     print(f"saved model weights to {CHECKPOINT_PATH}")
+
 
 class BlenderV2(nn.Module):
     def __init__(self, dim, num_layers):

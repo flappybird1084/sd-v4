@@ -192,7 +192,31 @@ def load_model(checkpoint_path, device):
 
 
 @torch.no_grad()
-def generate(model, device, digit, num_steps=NUM_STEPS, guidance_scale=GUIDANCE_SCALE, seed=None):
+def _decode_to_image(model, device, x, use_autocast):
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_autocast):
+        img = model.decode(x)
+    img = (img.clamp(-1, 1) + 1) / 2
+    img = img[0, 0].float().cpu().numpy()
+    img = (img * 255).astype(np.uint8)
+    # Upscale with nearest-neighbor so the 32x32 output fills the display box crisply.
+    return np.kron(img, np.ones((DISPLAY_SCALE, DISPLAY_SCALE), dtype=np.uint8))
+
+
+@torch.no_grad()
+def generate(
+    model,
+    device,
+    digit,
+    num_steps=NUM_STEPS,
+    guidance_scale=GUIDANCE_SCALE,
+    seed=None,
+    capture_every=1,
+):
+    """Integrate the latent ODE and return (frames, step_labels).
+
+    A decoded frame is captured every ``capture_every`` steps (and always at the
+    final step) so the UI can scrub through the diffusion process with a slider.
+    """
     if seed is not None:
         generator = torch.Generator(device=device).manual_seed(int(seed))
     else:
@@ -205,6 +229,9 @@ def generate(model, device, digit, num_steps=NUM_STEPS, guidance_scale=GUIDANCE_
     dt = 1.0 / num_steps
 
     use_autocast = device.type == "cuda"
+    capture_every = max(1, int(capture_every))
+    frames = []
+    labels = []
     for step in range(num_steps):
         t = torch.ones((1, 1), device=device) * ((step + 0.5) / num_steps)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_autocast):
@@ -213,34 +240,47 @@ def generate(model, device, digit, num_steps=NUM_STEPS, guidance_scale=GUIDANCE_
             v = v_uncond + guidance_scale * (v_cond - v_uncond)
         x = x + v * dt
 
-    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_autocast):
-        img = model.decode(x)
+        done = step + 1
+        if done % capture_every == 0 or done == num_steps:
+            frames.append(_decode_to_image(model, device, x, use_autocast))
+            labels.append(done)
 
-    img = (img.clamp(-1, 1) + 1) / 2
-    img = img[0, 0].float().cpu().numpy()
-    img = (img * 255).astype(np.uint8)
-    # Upscale with nearest-neighbor so the 32x32 output fills the display box crisply.
-    img = np.kron(img, np.ones((DISPLAY_SCALE, DISPLAY_SCALE), dtype=np.uint8))
-    return img
+    return frames, labels
 
 
 def build_interface(model, device):
-    def fn(digit, num_steps, guidance_scale, seed):
+    def run(digit, num_steps, guidance_scale, seed, capture_every):
         seed = None if seed is None or int(seed) < 0 else int(seed)
-        return generate(
+        frames, labels = generate(
             model,
             device,
             int(digit),
             num_steps=int(num_steps),
             guidance_scale=float(guidance_scale),
             seed=seed,
+            capture_every=int(capture_every),
         )
+        last = len(frames) - 1
+        # Slider sweeps over captured frames; land on the final (fully denoised) one.
+        slider_update = gr.update(
+            minimum=0, maximum=last, value=last, step=1,
+            label=f"Timestep (1–{labels[-1]} of {int(num_steps)})",
+        )
+        return frames, slider_update, frames[last]
+
+    def scrub(idx, frames):
+        if not frames:
+            return None
+        idx = max(0, min(int(idx), len(frames) - 1))
+        return frames[idx]
 
     with gr.Blocks(title="rf-v3 — MNIST digit generator") as demo:
         gr.Markdown(
             "# rf-v3 — MNIST digit generator\n"
-            "Pick a digit and generate an image with the rectified-flow model."
+            "Pick a digit, generate, then drag the **Timestep** slider to sweep "
+            "through the diffusion process."
         )
+        frames_state = gr.State([])
         with gr.Row():
             with gr.Column():
                 digit = gr.Dropdown(
@@ -253,11 +293,20 @@ def build_interface(model, device):
                     0.0, 15.0, value=GUIDANCE_SCALE, step=0.5, label="Guidance scale"
                 )
                 seed = gr.Number(value=-1, precision=0, label="Seed (-1 for random)")
+                capture_every = gr.Slider(
+                    1, 25, value=1, step=1, label="Capture every N steps"
+                )
                 btn = gr.Button("Generate", variant="primary")
             with gr.Column():
                 out = gr.Image(label="Generated", image_mode="L", height=320, width=320)
+                timestep = gr.Slider(0, 1, value=0, step=1, label="Timestep")
 
-        btn.click(fn, inputs=[digit, num_steps, guidance_scale, seed], outputs=out)
+        btn.click(
+            run,
+            inputs=[digit, num_steps, guidance_scale, seed, capture_every],
+            outputs=[frames_state, timestep, out],
+        )
+        timestep.change(scrub, inputs=[timestep, frames_state], outputs=out)
     return demo
 
 
